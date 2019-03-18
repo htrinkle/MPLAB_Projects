@@ -45,6 +45,7 @@
 
 #include "mcc_generated_files/mcc.h"
 #include <stdio.h>
+#include <math.h>
 
 volatile bool sec_flag = false;
 
@@ -58,6 +59,8 @@ uint8_t regAddr;
 
 #define buf_len 200
 uint8_t buf[200];
+
+uint8_t MPU_ar = 0;
 
 void MPU_Init()
 {
@@ -235,7 +238,8 @@ uint8_t MPU_SetAccel(uint8_t i)
     buf[0] = ar[i]; 
     MPU_Write(0x1C, buf, 1); 
     MPU_Read(0x1C, buf, 1);
-    return (buf[0]>>3) & 0x03;
+    MPU_ar = (buf[0]>>3) & 0x03;
+    return MPU_ar;
 }
 
 uint8_t MPU_SetGyro(uint8_t i)
@@ -248,6 +252,19 @@ uint8_t MPU_SetGyro(uint8_t i)
     MPU_Read(0x1C, buf, 1);
     return (buf[0]>>3) & 0x03;
 }
+
+float MPU_Angle(void) //Based on x and z accel
+{
+    MPU_Read(0x3B, buf, 6);
+    int ax = (buf[0]*256+buf[1]);
+    int az = (buf[4]*256+buf[5]);
+    const double pi = 3.1415;
+    const double rad2deg = 180.0 / pi;
+    double result = atan2(ax, az) * rad2deg;
+    return result;
+}
+
+
 
 bool MPU_Init_old(void)
 {
@@ -283,7 +300,8 @@ int main(void)
         if (sec_flag) {
             sec_flag = false;
             IO_RB4_Toggle();
-            printf("Hello Hans\n");
+            double angle = MPU_Angle();
+            printf("Angle = %d n", angle);
         }
         
     }
