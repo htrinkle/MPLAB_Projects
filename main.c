@@ -61,7 +61,7 @@ uint8_t buf[buf_len];
 
 uint8_t MPU_ar = 0;
 
-void MPU_Init()
+void I2C_Init()
 {
     
     I2C1CONbits.SIDL = 0;               // Continue in Idle
@@ -78,8 +78,10 @@ void MPU_Init()
     
     
     I2C1CONbits.ON = 1;                 // Turn on I2C1
-    // Baud Rate 0x18B = 395; 40,000,000MHz => ~100KHz clock
-    I2C1BRG = 0x18B;
+    // Baud Rate 0x018B = 395; 40,000,000MHz => ~100KHz clock
+    //           0x00C6 ~200KHz
+    //           0x0064 ~400KHz
+    I2C1BRG = 0x0064;
     
     // ACKEN disabled; STRICT disabled; STREN disabled; GCEN disabled; SMEN disabled; 
     // DISSLW disabled; I2CSIDL disabled; ACKDT Sends ACK; SCLREL Holds; 
@@ -89,26 +91,66 @@ void MPU_Init()
     I2C1STAT = 0x0;
 }
 
+void MPU_Init()
+{
+    I2C_Init();
+}
+
 // TX REG => I2C1TRN
 // RX RED => I2C1RSR -> I2C1RCV; RBF high if data ready in I2C1RSV
 
-#define _MPU_Start I2C1CONbits.SEN = 1
-#define _MPU_WaitStart while (I2C1CONbits.SEN)
+void inline I2C_Start(void)
+{
+    I2C1CONbits.SEN = 1;
+    while (I2C1CONbits.SEN) continue;
+}
 
-#define _MPU_Stop I2C1CONbits.PEN = 1
-#define _MPU_WaitStop while (I2C1CONbits.PEN)
+void inline I2C_Stop(void)
+{
+    I2C1CONbits.PEN = 1;
+    while (I2C1CONbits.PEN) continue;
+}
 
-// TRSTAT is transmit status; 1 if transmit in progress
-// IWCOL 1 => write to I2CxTRN failed due to busy
-// TBF 1 => Transmit Buffer Full (i.e. TX in progress)
-#define _MPU_TX(x) I2C1TRN = x
-#define _MPU_WaitTx while(I2C1STATbits.TRSTAT)
+void inline I2C_ReStart(void)
+{
+    I2C1CONbits.RSEN = 1;
+    while (I2C1CONbits.RSEN) continue;
+}
 
-// ACKSTAT contains ack received from slave (1 = nack, 0 = ack)  HW clear after slave acknowledge
-#define _MPU_WaitAck while(I2C1STATbits.ACKSTAT)
+bool inline I2C_Tx(uint8_t x)
+{
+    const uint32_t timeout = 20 * 1000; // 1000us or 1ms
+    I2C1TRN = x;
+    uint32_t start = _CP0_GET_COUNT();
+    while (I2C1STATbits.TRSTAT) {
+        if ((_CP0_GET_COUNT() - start) > timeout) return false;
+    };
+    return I2C1STATbits.ACKSTAT;
+}
 
-// BCL 1 => bus collision detected during master operation
-// RBF 1=> receive buffer full
+uint8_t inline I2C_Rx(bool lastRead) // a is true if last byte
+{
+    I2C1CONbits.RCEN;  // Enable Read
+    I2C1CONbits.ACKDT = lastRead;   // true (1) is NACK, false (0) is ACK)
+    while(I2C1CONbits.RCEN); // Wait till cleared (8 bits received)
+    I2C1CONbits.ACKEN = 1;   // Send (N)ACK
+    return I2C1RCV;
+}
+
+bool inline I2C_IsIdle(void)
+{
+    if (I2C1STATbits.TRSTAT) return false;
+    return  ((I2C1CON & 0x001F) == 0x0000);
+}
+
+bool I2C_WaitIdle(void)
+{
+    const uint32_t timeout = 20 * 1000; // 1000us or 1ms
+    uint32_t start = _CP0_GET_COUNT();
+    while((_CP0_GET_COUNT() - start) < timeout) {
+        if (I2C_IsIdle()) break;
+    }
+}
 
 inline void DelayUs(uint16_t us)
 {
@@ -116,13 +158,56 @@ inline void DelayUs(uint16_t us)
     uint32_t wait = us * 20; // FOSC = 40 MHz, Core Timer clock = FOSC/2
     uint32_t start = _CP0_GET_COUNT();
     while((_CP0_GET_COUNT() - start) < wait);
-    //T4CONbits.ON = false;
-    //TMR4 = 0;
-    //PR4 = 5 * us;
-    //IFS0bits.T4IF = false;
-    //T4CONbits.ON = true; 
-    //while(!IFS0bits.T4IF);
 }
+
+bool MPU_Read_x(uint8_t adr, uint8_t *buf, uint8_t len)
+{
+    if (~I2C_WaitIdle()) return false;
+    I2C_Start();
+    if (!I2C_Tx((mpu_id<<1) & 0xFE)) {
+        I2C_Stop();
+        return false;  
+    }
+    if (!I2C_Tx(adr)) {
+        I2C_Stop();
+        return false;
+    }
+    
+    I2C_ReStart();
+    if (!I2C_Tx((mpu_id<<1) | 0x01 )) {
+        I2C_Stop();
+        return false;  
+    }
+    int i;
+    for(i=0;i<len;i++) {
+        buf[i] = I2C_Rx(i == (len-1));
+    }
+    I2C_Stop();
+    return true;
+}
+
+bool MPU_Write_x(uint8_t *buf, uint8_t len)
+{
+    if (~I2C_WaitIdle()) return false;
+    I2C_Start();
+    if (!I2C_Tx((mpu_id<<1) & 0xFE)) {
+        I2C_Stop();
+        return false;  
+    }
+    int i;
+    for(i=0;i<len;i++) {
+        if (!I2C_Tx(buf[i])) {
+            I2C_Stop();
+            return false;  
+        }
+    }
+    I2C_Stop();
+    return true;
+}
+
+    //uint32_t wait = us * 20; // FOSC = 40 MHz, Core Timer clock = FOSC/2
+    //uint32_t start = _CP0_GET_COUNT();
+    //while((_CP0_GET_COUNT() - start) < wait);
 
 bool MPU_Read(uint8_t adr, uint8_t *buf, uint8_t len)
 {
@@ -143,7 +228,7 @@ bool MPU_Read(uint8_t adr, uint8_t *buf, uint8_t len)
     }
     
     if (i2c_status == I2C1_MESSAGE_COMPLETE) {  
-        printf("Read %02x = %02x\n", regAddr, buf[0]);
+        //printf("Read %02x = %02x\n", regAddr, buf[0]);
         return true;
     } 
 
@@ -166,9 +251,11 @@ bool MPU_Write(uint8_t *buf, uint8_t len)
     
     while(i2c_status == I2C1_MESSAGE_PENDING) {
         DelayUs(100);        
+        printf("pending\n");
     }
     
     if (i2c_status == I2C1_MESSAGE_COMPLETE) {  
+        printf("OK\n");
         return true;
     } 
 
@@ -210,19 +297,19 @@ uint8_t MPU_SetGyro(uint8_t i)
     return (buf[0]>>3) & 0x03;
 }
 
-double MPU_Angle(void) //Based on x and z accel
+float MPU_Angle(void) //Based on x and z accel
 {
     MPU_Read(0x3B, buf, 6);
     uint16_t ax_r = (buf[0]*256+buf[1]);
-    uint16_t ay_r = (buf[2]*256+buf[3]);
+    //uint16_t ay_r = (buf[2]*256+buf[3]);
     uint16_t az_r = (buf[4]*256+buf[5]);
     int16_t ax = (int16_t)ax_r;
-    int16_t ay = (int16_t)ay_r;
+    //int16_t ay = (int16_t)ay_r;
     int16_t az = (int16_t)az_r;
-    printf("x,y,z = %d,%d,%d\n", ax, ay, az);
-    const double pi = 3.1415;
-    const double rad2deg = 180.0 / pi;
-    double result = atan2(ax, az) * rad2deg;
+    //printf("x,y,z = %d,%d,%d\n", ax, ay, az);
+    const float pi = 3.1415;
+    const float rad2deg = 180.0 / pi;
+    float result = atan2f((ax + 0.0), (az + 0.0)) * rad2deg;
     return result;
 }
 
@@ -231,8 +318,10 @@ double MPU_Angle(void) //Based on x and z accel
 bool MPU_Init_old(void)
 {
     // Wake with internal osc
+    printf("Wake\n");
     MPU_Wake(0x00);
     
+    printf("Read ID\n");
     // Check Chip ID
     MPU_Read(0x75, buf, 1);
     printf("ID = 0x%02x\n", buf[0]);
@@ -276,13 +365,23 @@ int main(void)
     printf("Initialize MPU \n");
     MPU_Init_old();
     
+    printf("Calibrate MPU \n");
+    int i;
+    float angleCal = 0.0;
+    for(i=0; i<100; i++) {
+        DelayUs(1000);
+        angleCal += MPU_Angle();
+    }
+    angleCal = angleCal/100.0;
+    printf("Angle Offset: %f\n", angleCal);
+    
     while (1)
     {
         if (sec_flag) {
             sec_flag = false;
             IO_RB4_Toggle();
-            double angle = MPU_Angle();
-            printf("Angle: %d\n", angle);
+            float angle = MPU_Angle() - angleCal;
+            printf("Angle: %f\n", angle);
         }
         
     }
