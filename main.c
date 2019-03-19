@@ -53,12 +53,11 @@ const uint16_t max_i2c_retry = 3;
 const uint16_t mpu_id = 0x68;
 
 I2C1_MESSAGE_STATUS i2c_status;
-I2C1_TRANSACTION_REQUEST_BLOCK trb_W, trb_W1;
-I2C1_TRANSACTION_REQUEST_BLOCK trb_R;
+I2C1_TRANSACTION_REQUEST_BLOCK trb[2];
 uint8_t regAddr;
 
-#define buf_len 200
-uint8_t buf[200];
+#define buf_len 16
+uint8_t buf[buf_len];
 
 uint8_t MPU_ar = 0;
 
@@ -130,28 +129,21 @@ bool MPU_Read(uint8_t adr, uint8_t *buf, uint8_t len)
     i2c_status = I2C1_MESSAGE_PENDING;
     regAddr = adr;
 
-    I2C1_MasterWriteTRBBuild(&trb_W, &regAddr, 1, mpu_id);
-    I2C1_MasterReadTRBBuild(&trb_R, buf, len, mpu_id);
+    I2C1_MasterWriteTRBBuild(&trb[0], &regAddr, 1, mpu_id);
+    I2C1_MasterReadTRBBuild(&trb[1], buf, len, mpu_id);
    
-    I2C1_MasterTRBInsert(1, &trb_W, &i2c_status);
+    I2C1_MasterTRBInsert(2, trb, &i2c_status);
     if (i2c_status == I2C1_MESSAGE_FAIL) {
         printf("Fail Insert W\n");
         return false;
     }
     
-    I2C1_MasterTRBInsert(1, &trb_R, &i2c_status);
-    if (i2c_status == I2C1_MESSAGE_FAIL) {
-        printf("Fail Insert R\n");
-        return false;
-    }
-    
     while(i2c_status == I2C1_MESSAGE_PENDING) {
         DelayUs(100);        
-        printf("pending\n");
     }
     
     if (i2c_status == I2C1_MESSAGE_COMPLETE) {  
-        printf("Done\n");
+        printf("Read %02x = %02x\n", regAddr, buf[0]);
         return true;
     } 
 
@@ -159,33 +151,24 @@ bool MPU_Read(uint8_t adr, uint8_t *buf, uint8_t len)
     return false;
 }
 
-bool MPU_Write(uint8_t adr, uint8_t *buf, uint8_t len)
+bool MPU_Write(uint8_t *buf, uint8_t len)
 {
+    printf("writing %02x to %02x len %d\n", buf[1], buf[0], len);
     i2c_status = I2C1_MESSAGE_PENDING;
-    regAddr = adr;
 
-    I2C1_MasterWriteTRBBuild(&trb_W, &regAddr, 1, mpu_id);
-    I2C1_MasterWriteTRBBuild(&trb_W1, buf, len, mpu_id);
+    I2C1_MasterWriteTRBBuild(&trb[0], buf, len, mpu_id);
     
-    I2C1_MasterTRBInsert(1, &trb_W, &i2c_status);
+    I2C1_MasterTRBInsert(1, &trb[0], &i2c_status);
     if (i2c_status == I2C1_MESSAGE_FAIL) {
         printf("Fail Insert W\n");
         return false;
     }
     
-    I2C1_MasterTRBInsert(1, &trb_W1, &i2c_status);
-    if (i2c_status == I2C1_MESSAGE_FAIL) {
-        printf("Fail Insert W1\n");
-        return false;
-    }
-    
     while(i2c_status == I2C1_MESSAGE_PENDING) {
         DelayUs(100);        
-        printf("pending\n");
     }
     
     if (i2c_status == I2C1_MESSAGE_COMPLETE) {  
-        printf("Done\n");
         return true;
     } 
 
@@ -194,39 +177,11 @@ bool MPU_Write(uint8_t adr, uint8_t *buf, uint8_t len)
 
 }
 
-bool MPU_Flush(uint8_t *buf, uint8_t len)
+bool MPU_Wake(uint8_t c)
 {
-    uint8_t i;
-
-    i2c_status = I2C1_MESSAGE_PENDING;
-
-    for(i=0; i<len; i++) buf[i] = 0x00;
-    I2C1_MasterWriteTRBBuild(&trb_W, buf, len, mpu_id);
-   
-    I2C1_MasterTRBInsert(1, &trb_W, &i2c_status);
-    if (i2c_status == I2C1_MESSAGE_FAIL) {
-        printf("Fail Insert\n");
-        return false;
-    }
-
-    while(i2c_status == I2C1_MESSAGE_PENDING) {
-        DelayUs(1000);  
-        printf("pending\n");
-    }
-    
-    if (i2c_status == I2C1_MESSAGE_COMPLETE) {
-        printf("Done\n");
-        return true;
-    } 
-
-    printf("Failed %d", i2c_status);
-    return false;
-}
-
-bool MPU_Wake(void)
-{
-    buf[0] = 0x01;
-    MPU_Write(0x6B, buf, 1);  
+    buf[0] = 0x6B;
+    buf[1] = c;  
+    MPU_Write(buf, 2);  
     return true;
 }
 
@@ -235,8 +190,9 @@ uint8_t MPU_SetAccel(uint8_t i)
     // Range can be +/- 2,4,8,16 g -> correspond to 0x00, 0x08, 0x10, 0x18
     if (i > 3) return 0xFF;
     const uint8_t ar[] = {0x00, 0x08, 0x10, 0x18};
-    buf[0] = ar[i]; 
-    MPU_Write(0x1C, buf, 1); 
+    buf[0] = 0x1C;
+    buf[1] = ar[i];   
+    MPU_Write(buf, 2); 
     MPU_Read(0x1C, buf, 1);
     MPU_ar = (buf[0]>>3) & 0x03;
     return MPU_ar;
@@ -247,17 +203,23 @@ uint8_t MPU_SetGyro(uint8_t i)
     // Range can be +/- 250,500,1000,2000 deg/sec -> correspond to 0x00, 0x08, 0x10, 0x18
     if (i > 3) return 0xFF;
     const uint8_t gr[] = {0x00, 0x08, 0x10, 0x18};
-    buf[0] = gr[i];  
-    MPU_Write(0x1C, buf, 1); 
-    MPU_Read(0x1C, buf, 1);
+    buf[0] = 0x1B;
+    buf[1] = gr[i];   
+    MPU_Write(buf, 2); 
+    MPU_Read(0x1B, buf, 1);
     return (buf[0]>>3) & 0x03;
 }
 
-float MPU_Angle(void) //Based on x and z accel
+double MPU_Angle(void) //Based on x and z accel
 {
     MPU_Read(0x3B, buf, 6);
-    int ax = (buf[0]*256+buf[1]);
-    int az = (buf[4]*256+buf[5]);
+    uint16_t ax_r = (buf[0]*256+buf[1]);
+    uint16_t ay_r = (buf[2]*256+buf[3]);
+    uint16_t az_r = (buf[4]*256+buf[5]);
+    int16_t ax = (int16_t)ax_r;
+    int16_t ay = (int16_t)ay_r;
+    int16_t az = (int16_t)az_r;
+    printf("x,y,z = %d,%d,%d\n", ax, ay, az);
     const double pi = 3.1415;
     const double rad2deg = 180.0 / pi;
     double result = atan2(ax, az) * rad2deg;
@@ -268,14 +230,28 @@ float MPU_Angle(void) //Based on x and z accel
 
 bool MPU_Init_old(void)
 {
-    printf("Flush\n");
-    MPU_Flush(buf, 107);
-    printf("Read ID\n");
+    // Wake with internal osc
+    MPU_Wake(0x00);
+    
+    // Check Chip ID
     MPU_Read(0x75, buf, 1);
     printf("ID = 0x%02x\n", buf[0]);
-    MPU_Wake();
-    printf("Acceleration = 0x%02x\n", MPU_SetAccel(1));
-    printf("Gyro = 0x%02x\n", MPU_SetGyro(0));
+    
+    // Wake with Gyro 
+    MPU_Wake(0x01);
+    
+    uint8_t a = MPU_SetAccel(0x01);
+    printf("Acceleration = 0x%02x\n", a);
+    
+    uint8_t g = MPU_SetGyro(0x00);
+    printf("Gyro = 0x%02x\n", g);
+    
+    MPU_Read(0x1B, buf, 1);
+    printf("1B = 0x%02x\n", buf[0]);
+    
+    MPU_Read(0x1C, buf, 1);
+    printf("1C = 0x%02x\n", buf[0]);
+
     return true;
 }
 
@@ -290,18 +266,23 @@ int main(void)
     SYSTEM_Initialize();
     TMR1_Start();
     
-    printf("hi\n");
+    printf("Startup Delay ... \n");
+    sec_flag = false;
+    while (!sec_flag) continue;
+    sec_flag = false;
+    while (!sec_flag) continue;
+    sec_flag = false;
     
+    printf("Initialize MPU \n");
     MPU_Init_old();
     
     while (1)
     {
-        // Add your application code  
         if (sec_flag) {
             sec_flag = false;
             IO_RB4_Toggle();
             double angle = MPU_Angle();
-            printf("Angle = %d n", angle);
+            printf("Angle: %d\n", angle);
         }
         
     }
